@@ -1,23 +1,18 @@
 import cv2
 import numpy as np
-from insightface.model_zoo.scrfd import SCRFD
-from insightface.app import FaceAnalysis
-from numpy.linalg import norm
 import os
 import pickle
+from insightface.app import FaceAnalysis
+from numpy.linalg import norm
 
 # ========== Config ==========
-SCRFD_MODEL_PATH = "/Users/phuongtxq/Desktop/test/scrfd_person_2.5g.onnx"
 EMBEDDING_PATH = "face_db.pkl"
 SAVE_DIR = "faces"
 THRESHOLD = 0.5
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# ========== Initialize Detectors ==========
-detector = SCRFD(SCRFD_MODEL_PATH)
-detector.prepare(ctx_id=0, input_size=(640, 640))
-
+# ========== Initialize FaceAnalysis ==========
 face_app = FaceAnalysis(name="buffalo_sc", providers=["CPUExecutionProvider"])
 face_app.prepare(ctx_id=0)
 
@@ -30,7 +25,7 @@ else:
 
 # ========== Similarity Function ==========
 def cosine_similarity(a, b):
-    return np.dot(a, b) / (norm(a) * norm(b))
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 # ========== Start Camera ==========
 cap = cv2.VideoCapture(0)
@@ -44,53 +39,34 @@ while True:
         break
 
     img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    outputs = detector.detect(img_rgb)
 
-    bboxes = outputs[0] if isinstance(outputs, tuple) else outputs
+    # Detect and recognize faces in one call
+    faces = face_app.get(img_rgb)
 
     unknown_face = None
     unknown_embedding = None
 
-    for bbox in bboxes:
-        if len(bbox) < 4:
+    for face in faces:
+        x1, y1, x2, y2 = map(int, face.bbox)
+        score = face.det_score
+
+        if score < THRESHOLD:
             continue
 
-        x1, y1, x2, y2 = map(int, bbox[:4])
-        score = bbox[4] if len(bbox) == 5 else 1.0
+        embedding = face.embedding
 
-        # Skip invalid box
-        if score < THRESHOLD or x2 - x1 <= 0 or y2 - y1 <= 0:
-            continue
-
-        # Crop and validate person region
-        person_crop_rgb = img_rgb[y1:y2, x1:x2]
-        person_crop_bgr = frame[y1:y2, x1:x2]
-
-        if person_crop_rgb.size == 0 or person_crop_rgb.shape[0] == 0 or person_crop_rgb.shape[1] == 0:
-            continue
-
-        faces = face_app.get(person_crop_rgb)
-
-        label = "No face"
+        # Match with database
+        label = "Unknown"
         best_score = 0
-        matched_name = "Unknown"
+        for name, db_emb in face_db.items():
+            sim = cosine_similarity(embedding, db_emb)
+            if sim > THRESHOLD and sim > best_score:
+                label = f"{name} ({sim:.2f})"
+                best_score = sim
 
-        if faces:
-            face = faces[0]
-            embedding = face.embedding
-
-            for name, db_emb in face_db.items():
-                sim = cosine_similarity(embedding, db_emb)
-                if sim > THRESHOLD and sim > best_score:
-                    matched_name = name
-                    best_score = sim
-
-            if matched_name != "Unknown":
-                label = f"{matched_name} ({best_score:.2f})"
-            else:
-                label = "Unknown"
-                unknown_face = person_crop_bgr
-                unknown_embedding = embedding
+        if label == "Unknown":
+            unknown_face = frame[y1:y2, x1:x2]
+            unknown_embedding = embedding
 
         # Draw bounding box and label
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -122,4 +98,4 @@ while True:
         break
 
 cap.release()
-cv2.destroyWindow("Face Recognition")
+cv2.destroyAllWindows()
